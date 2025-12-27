@@ -36,6 +36,7 @@ pub mod events;
 pub mod config;
 pub mod namespace;
 pub mod reactor;
+pub mod sdk;
 
 // Persistence requires encrypted Store (crypto feature)
 #[cfg(feature = "crypto")]
@@ -56,6 +57,7 @@ pub use events::{
 };
 pub use namespace::WalletNamespace;
 pub use reactor::{WalletReactor, ReactorEventAdapter};
+pub use sdk::{SparkSdkWrapper, PaymentInfo, ReceiveInfo};
 
 #[cfg(feature = "crypto")]
 pub use persistence::WalletPersistence;
