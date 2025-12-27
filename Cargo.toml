@@ -45,6 +45,9 @@ thiserror = "2.0"
 # Random (for scroll IDs)
 rand = "0.8"
 
+# Async trait for EventListener
+async-trait = "0.1"
+
 # Crypto (optional - for wallet/vault)
 aes-gcm = { version = "0.10", optional = true }
 argon2 = { version = "0.5", optional = true }

@@ -70,6 +70,10 @@ pub mod vault;
 #[cfg(feature = "keys")]
 pub mod keys;
 
+// Nostr module - NIP-06 signing + NIP-44 encryption
+#[cfg(feature = "keys")]
+pub mod nostr;
+
 // Wallet trait - unified interface for all backends
 #[cfg(feature = "wallet")]
 pub mod wallet_trait;
@@ -109,17 +113,32 @@ pub use vault::VaultStore;
 #[cfg(feature = "keys")]
 pub use keys::{derive_mobinumber, KeyError, MasterKey};
 
+// Nostr (keys feature - signing & encryption)
+#[cfg(feature = "keys")]
+pub use nostr::{parse_public_key, NostrError, NostrSigner};
+
 // Wallet trait (any wallet backend)
 #[cfg(feature = "wallet")]
 pub use wallet_trait::{SignedMessage, TransactionDetails, WalletBackend, WalletBalance, WalletError};
 
 // Wallet Spark backend (experimental)
 #[cfg(feature = "wallet")]
-pub use wallet_spark::{SparkNetwork, WalletManager as SparkWalletManager};
+pub use wallet_spark::{
+    SparkNetwork, WalletConfig, WalletManager as SparkWalletManager, WalletNamespace,
+    // Event types for payment streaming
+    EventListener, SdkEvent, Payment, PaymentState, PaymentType, PaymentDetails,
+};
 
 // Default WalletManager alias
 #[cfg(feature = "wallet")]
 pub use wallet_spark::WalletManager;
+
+/// Type alias for compatibility with beewallet-core-breez
+///
+/// In megab, code uses `LiquidNetwork::Testnet`. This alias allows
+/// the same code to work with Spark backend.
+#[cfg(feature = "wallet")]
+pub type LiquidNetwork = SparkNetwork;
 
 /// Network enum - compatibility with bitcoin::Network style API
 #[cfg(feature = "wallet")]

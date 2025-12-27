@@ -9,10 +9,21 @@
 //! Real implementation requires Breez SDK Spark integration.
 
 pub mod signing;
+pub mod events;
+pub mod config;
+pub mod namespace;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
+
+// Re-export submodule types
+pub use config::WalletConfig;
+pub use events::{
+    EventListener, SdkEvent, Payment, PaymentType, PaymentState, PaymentDetails,
+    ClaimedDeposit, UnclaimedDeposit,
+};
+pub use namespace::WalletNamespace;
 
 // Re-export common types
 pub use crate::wallet_trait::{SignedMessage, TransactionDetails, WalletBalance};
