@@ -1,0 +1,78 @@
+[package]
+name = "beewallet-core-spark"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+authors = ["OBIVERSE <obiversellc@gmail.com>"]
+license = "MIT OR Apache-2.0"
+description = "Sovereign Bitcoin + Lightning wallet using Breez SDK Spark (experimental)"
+readme = "README.md"
+repository = "https://github.com/obiverse/beewallet-core-spark"
+keywords = ["bitcoin", "lightning", "wallet", "breez", "spark"]
+categories = ["cryptography", "authentication"]
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = ["std-channel"]
+# Enable std threading for watch channels (not WASM compatible)
+std-channel = []
+
+# Crypto primitives (AES-256-GCM, Argon2id, HKDF)
+crypto = ["dep:aes-gcm", "dep:argon2", "dep:zeroize", "dep:base64"]
+
+# Keys module (BIP39 + Nostr identity)
+keys = ["crypto", "dep:bip39", "dep:nostr"]
+
+# Wallet backend: Spark (experimental, native Bitcoin)
+wallet = ["keys", "dep:breez-sdk-spark", "dep:tokio", "dep:bitcoin"]
+
+[dependencies]
+# Serialization (always needed for Scroll)
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Hashing for 9S content addressing
+sha2 = "0.10"
+
+# Platform directories (for Store default path)
+dirs = "5.0"
+
+# Error handling
+thiserror = "2.0"
+
+# Random (for scroll IDs)
+rand = "0.8"
+
+# Crypto (optional - for wallet/vault)
+aes-gcm = { version = "0.10", optional = true }
+argon2 = { version = "0.5", optional = true }
+zeroize = { version = "1.7", features = ["derive"], optional = true }
+base64 = { version = "0.22", optional = true }
+
+# BIP39 mnemonic (for keys module)
+bip39 = { version = "2.0", optional = true }
+
+# Nostr (for NIP-06 key derivation - uses nostr::bitcoin for BIP32)
+nostr = { version = "0.37", features = ["nip06", "nip44"], optional = true }
+
+# Bitcoin (for NetworkKind in signing API)
+bitcoin = { version = "0.32", features = ["secp-lowmemory"], optional = true }
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "sync"], optional = true }
+
+# Breez SDK Spark - Native Bitcoin L2 (experimental)
+# Uses statechain model, no Liquid wrapping, good for small amounts (zaps)
+breez-sdk-spark = { git = "https://github.com/breez/spark-sdk", branch = "main", package = "breez-sdk-spark", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+proptest = "1.4"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
