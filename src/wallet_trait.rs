@@ -3,21 +3,36 @@
 //! This module defines the common interface for all wallet backends.
 //! Both Liquid and Spark implementations conform to this trait.
 //!
+//! # Dialectics: WalletBackend vs Namespace
+//!
+//! **Thesis**: Named methods (`balance()`, `send()`) are ergonomic.
+//! **Antithesis**: 9S Protocol uses 5 frozen ops (read/write/list/watch/close).
+//! **Synthesis**: WalletManager implements Namespace directly; WalletBackend
+//! is kept for backwards compatibility but convenience methods delegate to
+//! Namespace operations internally.
+//!
+//! ## Preferred Pattern (9S Way)
+//!
+//! ```rust,ignore
+//! use beewallet_core_spark::{WalletManager, Namespace};
+//!
+//! let wallet = WalletManager::new(SparkNetwork::Regtest, None);
+//! wallet.connect(mnemonic, None)?;
+//!
+//! // Use namespace operations directly
+//! let balance_scroll = wallet.read("/balance")?;
+//! let send_scroll = wallet.write("/send", json!({"to": addr, "amount": 1000}))?;
+//!
+//! // Or use convenience methods (which delegate to read/write)
+//! let balance = wallet.balance()?;
+//! let txid = wallet.send(addr, 1000, None)?;
+//! ```
+//!
 //! # Backend Selection
 //!
 //! Due to SQLite conflicts, backends are in separate crates:
 //! - `beewallet-core-breez` - Breez SDK Liquid (production, L-BTC wrapping)
 //! - `beewallet-core-spark` - Breez SDK Spark (experimental, native BTC)
-//!
-//! # Example
-//!
-//! ```rust,ignore
-//! use beewallet_core_spark::*;
-//!
-//! let wallet = SparkWalletManager::new(SparkNetwork::Testnet, api_key);
-//! wallet.connect(mnemonic, None)?;
-//! let balance = wallet.balance()?;
-//! ```
 
 use std::fmt;
 use thiserror::Error;
@@ -110,6 +125,24 @@ impl fmt::Display for SignedMessage {
 /// Both Liquid and Spark implementations conform to this trait,
 /// allowing code to be written against the trait without caring
 /// which backend is in use.
+///
+/// # Deprecation Note
+///
+/// This trait is preserved for backwards compatibility with existing code.
+/// The preferred pattern is to use `Namespace` directly:
+///
+/// ```rust,ignore
+/// // Preferred: Use Namespace trait
+/// wallet.read("/balance")?;
+/// wallet.write("/send", json!({...}))?;
+///
+/// // Also available: Convenience methods
+/// wallet.balance()?;
+/// wallet.send(dest, amount, None)?;
+/// ```
+///
+/// WalletManager implements both `Namespace` and `WalletBackend`.
+/// New code should prefer `Namespace` operations.
 pub trait WalletBackend: Send + Sync {
     // =========================================================================
     // Lifecycle
