@@ -60,7 +60,8 @@
 //!
 //! # Usage
 //!
-//! ```rust
+//! ```rust,ignore
+//! // Requires crypto feature
 //! use beewallet_core_spark::nine_s::{Store, Namespace};
 //! use serde_json::json;
 //!
@@ -1244,7 +1245,7 @@ fn decrypt_scroll(sealed_scroll: &Scroll, key: &[u8; 32]) -> Result<Scroll> {
 // 3. All Store constructors require encryption keys
 // Use FileNamespace directly for non-encrypted storage needs.
 
-#[cfg(test)]
+#[cfg(all(test, feature = "crypto"))]
 mod tests {
     use super::*;
     use serde_json::json;

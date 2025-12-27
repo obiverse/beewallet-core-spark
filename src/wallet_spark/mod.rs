@@ -37,6 +37,10 @@ pub mod config;
 pub mod namespace;
 pub mod reactor;
 
+// Persistence requires encrypted Store (crypto feature)
+#[cfg(feature = "crypto")]
+pub mod persistence;
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
@@ -52,6 +56,9 @@ pub use events::{
 };
 pub use namespace::WalletNamespace;
 pub use reactor::{WalletReactor, ReactorEventAdapter};
+
+#[cfg(feature = "crypto")]
+pub use persistence::WalletPersistence;
 
 // Re-export common types
 pub use crate::wallet_trait::{SignedMessage, TransactionDetails, WalletBalance};
@@ -149,6 +156,9 @@ pub struct WalletManager {
     connected: Arc<Mutex<bool>>,
     /// Reactive event core - handles SDK events → Scroll streams
     reactor: Arc<reactor::WalletReactor>,
+    /// Persistence layer - bridges reactor with encrypted store
+    #[cfg(feature = "crypto")]
+    persistence: Option<Arc<persistence::WalletPersistence>>,
 }
 
 impl WalletManager {
@@ -160,6 +170,8 @@ impl WalletManager {
             working_dir: None,
             connected: Arc::new(Mutex::new(false)),
             reactor: Arc::new(reactor::WalletReactor::new()),
+            #[cfg(feature = "crypto")]
+            persistence: None,
         }
     }
 
@@ -173,9 +185,37 @@ impl WalletManager {
         self.reactor.clone()
     }
 
+    /// Get persistence layer (if initialized)
+    ///
+    /// Persistence is initialized when `with_store()` is called.
+    #[cfg(feature = "crypto")]
+    pub fn persistence(&self) -> Option<Arc<persistence::WalletPersistence>> {
+        self.persistence.clone()
+    }
+
     /// Set working directory for wallet data
     pub fn with_working_dir(mut self, dir: PathBuf) -> Self {
         self.working_dir = Some(dir);
+        self
+    }
+
+    /// Initialize persistence with an encrypted Store
+    ///
+    /// This bridges the reactive event core (Reactor) with encrypted
+    /// cold storage (Store). Call this before `connect()` to enable
+    /// state persistence across restarts.
+    ///
+    /// ## Architecture
+    ///
+    /// ```text
+    /// SDK Events → Reactor (hot cache) → Store (cold storage)
+    ///                  ↑                      |
+    ///                  └── load_into_cache() ←┘
+    /// ```
+    #[cfg(feature = "crypto")]
+    pub fn with_store(mut self, store: crate::nine_s::Store) -> Self {
+        let persistence = persistence::WalletPersistence::new(store, self.reactor.clone());
+        self.persistence = Some(Arc::new(persistence));
         self
     }
 
@@ -706,5 +746,53 @@ mod tests {
         assert!(scroll.key.starts_with("/wallet/tx/"));
         assert_eq!(scroll.data["amount_sat"], 21000);
         assert_eq!(scroll.data["type"], "receive");
+    }
+
+    #[cfg(feature = "crypto")]
+    mod crypto_tests {
+        use super::*;
+        use tempfile::tempdir;
+        use crate::nine_s::Store;
+
+        #[test]
+        fn test_with_store_initializes_persistence() {
+            let dir = tempdir().unwrap();
+            let key = Store::test_key();
+            let store = Store::at(dir.path(), &key).unwrap();
+
+            let manager = WalletManager::new(SparkNetwork::Regtest, None)
+                .with_store(store);
+
+            // Persistence should be initialized
+            assert!(manager.persistence().is_some());
+        }
+
+        #[test]
+        fn test_wallet_manager_without_store_no_persistence() {
+            let manager = WalletManager::new(SparkNetwork::Regtest, None);
+
+            // Persistence should not be initialized
+            assert!(manager.persistence().is_none());
+        }
+
+        #[test]
+        fn test_persistence_through_wallet_manager() {
+            let dir = tempdir().unwrap();
+            let key = Store::test_key();
+            let store = Store::at(dir.path(), &key).unwrap();
+
+            let manager = WalletManager::new(SparkNetwork::Regtest, None)
+                .with_store(store);
+
+            let persistence = manager.persistence().expect("Persistence should be initialized");
+
+            // Persist balance
+            persistence.persist_balance(100000, 5000).unwrap();
+
+            // Should be in reactor cache
+            let cached = manager.reactor().get_cached("/wallet/balance").unwrap();
+            assert_eq!(cached.data["confirmed"], 100000);
+            assert_eq!(cached.data["trusted_pending"], 5000);
+        }
     }
 }
