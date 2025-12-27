@@ -35,6 +35,7 @@ pub mod signing;
 pub mod events;
 pub mod config;
 pub mod namespace;
+pub mod reactor;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -50,6 +51,7 @@ pub use events::{
     ClaimedDeposit, UnclaimedDeposit,
 };
 pub use namespace::WalletNamespace;
+pub use reactor::{WalletReactor, ReactorEventAdapter};
 
 // Re-export common types
 pub use crate::wallet_trait::{SignedMessage, TransactionDetails, WalletBalance};
@@ -141,12 +143,12 @@ pub struct WalletManager {
     // sdk: Arc<Mutex<Option<Arc<SparkSdk>>>>,
     // runtime: Arc<Runtime>,
     network: SparkNetwork,
+    #[allow(dead_code)]
     api_key: Option<String>,
     working_dir: Option<PathBuf>,
     connected: Arc<Mutex<bool>>,
-    // Event broadcast channel for watch()
-    #[cfg(feature = "std-channel")]
-    event_sender: Arc<Mutex<Option<std::sync::mpsc::Sender<Scroll>>>>,
+    /// Reactive event core - handles SDK events → Scroll streams
+    reactor: Arc<reactor::WalletReactor>,
 }
 
 impl WalletManager {
@@ -157,9 +159,18 @@ impl WalletManager {
             api_key,
             working_dir: None,
             connected: Arc::new(Mutex::new(false)),
-            #[cfg(feature = "std-channel")]
-            event_sender: Arc::new(Mutex::new(None)),
+            reactor: Arc::new(reactor::WalletReactor::new()),
         }
+    }
+
+    /// Get reactor for event handling
+    ///
+    /// Use this to:
+    /// - Register the ReactorEventAdapter with the SDK
+    /// - Manually emit events for testing
+    /// - Access cached state
+    pub fn reactor(&self) -> Arc<reactor::WalletReactor> {
+        self.reactor.clone()
     }
 
     /// Set working directory for wallet data
@@ -554,17 +565,35 @@ impl Namespace for WalletManager {
     }
 
     /// Watch for changes (payment events)
+    ///
+    /// The reactor handles pattern matching and dispatches Scrolls
+    /// to watchers when SDK events occur.
+    ///
+    /// ## Patterns
+    ///
+    /// - `/wallet/balance` - Balance updates
+    /// - `/wallet/tx/*` - Specific transaction updates
+    /// - `/wallet/tx/**` - All transaction events
+    /// - `/wallet/**` - All wallet events
+    ///
+    /// ## Example
+    ///
+    /// ```rust,ignore
+    /// let mut rx = wallet.watch("/wallet/tx/**")?;
+    ///
+    /// // In UI thread or async task:
+    /// while let Some(scroll) = rx.recv() {
+    ///     match scroll.type_.as_str() {
+    ///         "wallet/payment@v1" => update_payment(scroll),
+    ///         "wallet/balance@v1" => update_balance(scroll),
+    ///         _ => {}
+    ///     }
+    /// }
+    /// ```
     fn watch(&self, pattern: &str) -> nine_s::Result<nine_s::Receiver<Scroll>> {
-        if !self.is_connected() {
-            return Err(nine_s::Error::Unavailable("Wallet not connected".into()));
-        }
-
-        // TODO: Wire up SDK event listener to channel
-        // For now, return error
-        Err(nine_s::Error::Unavailable(format!(
-            "Watch not yet implemented for pattern: {}",
-            pattern
-        )))
+        // Watch works even when disconnected (will receive events when connected)
+        // This allows UI to set up watchers before connection is established
+        Ok(self.reactor.watch(pattern))
     }
 
     /// Close wallet connection
@@ -632,5 +661,50 @@ mod tests {
         let nine_s_err = nine_s::Error::NotFound("/test".into());
         let wallet_err: WalletError = nine_s_err.into();
         assert!(matches!(wallet_err, WalletError::NotFound(_)));
+    }
+
+    #[test]
+    fn test_watch_reactive() {
+        let manager = WalletManager::new(SparkNetwork::Regtest, None);
+
+        // Set up watcher before connection
+        let mut rx = manager.watch("/wallet/balance").unwrap();
+
+        // Emit balance via reactor
+        manager.reactor().emit_balance(50000, 1000);
+
+        // Should receive the balance scroll
+        let scroll = rx.try_recv().expect("Should receive balance scroll");
+        assert_eq!(scroll.key, "/wallet/balance");
+        assert_eq!(scroll.data["confirmed"], 50000);
+        assert_eq!(scroll.data["trusted_pending"], 1000);
+    }
+
+    #[test]
+    fn test_watch_payment_events() {
+        let manager = WalletManager::new(SparkNetwork::Regtest, None);
+
+        // Watch for all tx events
+        let mut rx = manager.watch("/wallet/tx/**").unwrap();
+
+        // Simulate a payment event from SDK
+        let payment = Payment {
+            id: "pay123".to_string(),
+            payment_type: PaymentType::Receive,
+            state: PaymentState::Complete,
+            amount_sat: 21000,
+            fee_sat: Some(100),
+            timestamp: Some(1234567890),
+            description: Some("Test sats".to_string()),
+            details: PaymentDetails::default(),
+        };
+
+        manager.reactor().ingest(SdkEvent::PaymentSucceeded { payment });
+
+        // Should receive payment scroll
+        let scroll = rx.try_recv().expect("Should receive payment scroll");
+        assert!(scroll.key.starts_with("/wallet/tx/"));
+        assert_eq!(scroll.data["amount_sat"], 21000);
+        assert_eq!(scroll.data["type"], "receive");
     }
 }
