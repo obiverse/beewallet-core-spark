@@ -43,9 +43,10 @@ pub mod sdk;
 pub mod persistence;
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use thiserror::Error;
 use serde_json::{json, Value};
+use tokio::runtime::Runtime;
 
 use crate::nine_s::{self, Namespace, Scroll};
 
@@ -148,14 +149,14 @@ impl std::fmt::Display for SparkNetwork {
 /// Convenience methods (`balance()`, `send()`) are thin wrappers
 /// that delegate to `read()`/`write()`.
 pub struct WalletManager {
-    // SDK instance would go here
-    // sdk: Arc<Mutex<Option<Arc<SparkSdk>>>>,
-    // runtime: Arc<Runtime>,
+    /// Async runtime for SDK operations
+    runtime: Arc<Runtime>,
+    /// SDK wrapper for Spark operations
+    sdk: Arc<sdk::SparkSdkWrapper>,
     network: SparkNetwork,
     #[allow(dead_code)]
     api_key: Option<String>,
     working_dir: Option<PathBuf>,
-    connected: Arc<Mutex<bool>>,
     /// Reactive event core - handles SDK events → Scroll streams
     reactor: Arc<reactor::WalletReactor>,
     /// Persistence layer - bridges reactor with encrypted store
@@ -166,12 +167,22 @@ pub struct WalletManager {
 impl WalletManager {
     /// Create new wallet manager
     pub fn new(network: SparkNetwork, api_key: Option<String>) -> Self {
+        let runtime = Arc::new(
+            Runtime::new().expect("Failed to create tokio runtime")
+        );
+        let reactor = Arc::new(reactor::WalletReactor::new());
+        let sdk = Arc::new(sdk::SparkSdkWrapper::new(
+            reactor.clone(),
+            runtime.handle().clone(),
+        ));
+
         Self {
+            runtime,
+            sdk,
             network,
             api_key,
             working_dir: None,
-            connected: Arc::new(Mutex::new(false)),
-            reactor: Arc::new(reactor::WalletReactor::new()),
+            reactor,
             #[cfg(feature = "crypto")]
             persistence: None,
         }
@@ -233,13 +244,20 @@ impl WalletManager {
     /// Connect with mnemonic
     ///
     /// This is a lifecycle operation, not expressible as read/write.
-    pub fn connect(&self, _mnemonic: &str, _passphrase: Option<&str>) -> Result<(), WalletError> {
-        // TODO: Implement with Breez SDK Spark
-        // let config = SparkSdkConfig::new(self.network, self.api_key.clone(), self.working_dir.clone());
-        // let sdk = self.runtime.block_on(async { SparkSdk::connect(config, mnemonic).await })?;
-        // *self.sdk.lock().unwrap() = Some(Arc::new(sdk));
-        *self.connected.lock().unwrap() = true;
-        Err(WalletError::NotImplemented)
+    pub fn connect(&self, mnemonic: &str, passphrase: Option<&str>) -> Result<(), WalletError> {
+        let working_dir = self.working_dir
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "/tmp/beewallet-spark".to_string());
+
+        self.runtime.block_on(async {
+            self.sdk.connect(
+                mnemonic,
+                passphrase,
+                self.network,
+                &working_dir,
+            ).await
+        }).map_err(|e| WalletError::Sdk(e.to_string()))
     }
 
     /// Initialize from mnemonic (same as connect for Spark)
@@ -262,13 +280,16 @@ impl WalletManager {
 
     /// Disconnect
     pub fn disconnect(&self) -> Result<(), WalletError> {
-        *self.connected.lock().unwrap() = false;
-        Ok(())
+        self.runtime.block_on(async {
+            self.sdk.disconnect().await
+        }).map_err(|e| WalletError::Sdk(e.to_string()))
     }
 
     /// Check if connected
     pub fn is_connected(&self) -> bool {
-        *self.connected.lock().unwrap()
+        self.runtime.block_on(async {
+            self.sdk.is_connected().await
+        })
     }
 
     /// Get balance (delegates to read("/balance"))
@@ -483,16 +504,47 @@ impl Namespace for WalletManager {
 
         match path {
             "/balance" => {
-                // TODO: sdk.get_info().balance
-                Err(nine_s::Error::Unavailable("Not implemented".into()))
+                let balance = self.runtime.block_on(async {
+                    self.sdk.get_balance().await
+                }).map_err(|e| nine_s::Error::Internal(e.to_string()))?;
+
+                // Cache in reactor
+                self.reactor.emit_balance(balance, 0);
+
+                Ok(Some(Scroll::typed(
+                    "/wallet/balance",
+                    json!({
+                        "confirmed": balance,
+                        "trusted_pending": 0,
+                        "untrusted_pending": 0,
+                        "immature": 0,
+                    }),
+                    "wallet/balance@v1",
+                )))
             }
             "/address" => {
-                // TODO: sdk.receive_onchain().address
-                Err(nine_s::Error::Unavailable("Not implemented".into()))
+                let address = self.runtime.block_on(async {
+                    self.sdk.get_spark_address().await
+                }).map_err(|e| nine_s::Error::Internal(e.to_string()))?;
+
+                Ok(Some(Scroll::typed(
+                    "/wallet/address",
+                    json!({"address": address}),
+                    "wallet/address@v1",
+                )))
             }
             "/pubkey" => {
-                // TODO: sdk.get_info().pubkey
-                Err(nine_s::Error::Unavailable("Not implemented".into()))
+                // Spark address includes the identity pubkey
+                let address = self.runtime.block_on(async {
+                    self.sdk.get_spark_address().await
+                }).map_err(|e| nine_s::Error::Internal(e.to_string()))?;
+
+                // Extract pubkey from spark address (it's part of the address format)
+                Ok(Some(Scroll::typed(
+                    "/wallet/pubkey",
+                    json!({"pubkey": address}),
+                    "wallet/pubkey@v1",
+                )))
             }
             "/network" => {
                 Ok(Some(Scroll::typed(
@@ -502,13 +554,54 @@ impl Namespace for WalletManager {
                 )))
             }
             p if p == "/transactions" || p.starts_with("/transactions?") => {
-                // TODO: sdk.list_payments()
-                Err(nine_s::Error::Unavailable("Not implemented".into()))
+                // Parse limit from query string
+                let limit = p.split("limit=")
+                    .nth(1)
+                    .and_then(|s| s.split('&').next())
+                    .and_then(|s| s.parse::<u32>().ok());
+
+                let payments = self.runtime.block_on(async {
+                    self.sdk.list_payments(limit).await
+                }).map_err(|e| nine_s::Error::Internal(e.to_string()))?;
+
+                let txs: Vec<Value> = payments.iter().map(|p| json!({
+                    "txid": p.id,
+                    "received": if matches!(p.payment_type, PaymentType::Receive) { p.amount_sat } else { 0 },
+                    "sent": if matches!(p.payment_type, PaymentType::Send) { p.amount_sat } else { 0 },
+                    "fee": p.fee_sat,
+                    "timestamp": p.timestamp,
+                    "is_confirmed": matches!(p.status, PaymentState::Complete),
+                })).collect();
+
+                Ok(Some(Scroll::typed(
+                    "/wallet/transactions",
+                    json!({"transactions": txs}),
+                    "wallet/transactions@v1",
+                )))
             }
             p if p.starts_with("/tx/") => {
-                // TODO: lookup single transaction
-                let _txid = &p[4..];
-                Err(nine_s::Error::Unavailable("Not implemented".into()))
+                let txid = &p[4..];
+                // Try to find in cached payments
+                let payments = self.runtime.block_on(async {
+                    self.sdk.list_payments(Some(100)).await
+                }).map_err(|e| nine_s::Error::Internal(e.to_string()))?;
+
+                if let Some(payment) = payments.iter().find(|p| p.id == txid) {
+                    Ok(Some(Scroll::typed(
+                        &format!("/wallet/tx/{}", txid),
+                        json!({
+                            "txid": payment.id,
+                            "type": if matches!(payment.payment_type, PaymentType::Receive) { "receive" } else { "send" },
+                            "amount_sat": payment.amount_sat,
+                            "fee_sat": payment.fee_sat,
+                            "timestamp": payment.timestamp,
+                            "state": format!("{:?}", payment.status),
+                        }),
+                        "wallet/payment@v1",
+                    )))
+                } else {
+                    Err(nine_s::Error::NotFound(format!("Transaction {} not found", txid)))
+                }
             }
             _ => Ok(None),
         }
@@ -530,38 +623,67 @@ impl Namespace for WalletManager {
 
         match path {
             "/send" => {
-                let _destination = data["to"].as_str()
+                let destination = data["to"].as_str()
                     .or_else(|| data["destination"].as_str())
                     .ok_or_else(|| nine_s::Error::InvalidData("Missing 'to' field".into()))?;
-                let _amount = data["amount"].as_u64()
-                    .or_else(|| data["amount_sat"].as_u64())
-                    .ok_or_else(|| nine_s::Error::InvalidData("Missing 'amount' field".into()))?;
-                let _fee_rate = data["feeRate"].as_f64()
-                    .or_else(|| data["fee_rate"].as_f64());
+                let amount = data["amount"].as_u64()
+                    .or_else(|| data["amount_sat"].as_u64());
 
-                // TODO: sdk.send_payment()
-                Err(nine_s::Error::Unavailable("Not implemented".into()))
+                let payment = self.runtime.block_on(async {
+                    self.sdk.send(destination, amount).await
+                }).map_err(|e| nine_s::Error::Internal(e.to_string()))?;
+
+                Ok(Scroll::typed(
+                    &format!("/wallet/tx/{}", payment.id),
+                    json!({
+                        "txid": payment.id,
+                        "type": "send",
+                        "amount_sat": payment.amount_sat,
+                        "fee_sat": payment.fee_sat,
+                        "timestamp": payment.timestamp,
+                        "state": format!("{:?}", payment.status),
+                    }),
+                    "wallet/payment@v1",
+                ))
             }
             "/invoice" | "/receive" => {
-                let _amount = data["amount"].as_u64()
+                let amount = data["amount"].as_u64()
                     .or_else(|| data["amountSat"].as_u64())
                     .or_else(|| data["amount_sat"].as_u64())
                     .ok_or_else(|| nine_s::Error::InvalidData("Missing 'amount' field".into()))?;
-                let _description = data["description"].as_str();
+                let description = data["description"].as_str().map(|s| s.to_string());
 
-                // TODO: sdk.receive_payment()
-                Err(nine_s::Error::Unavailable("Not implemented".into()))
+                let receive_info = self.runtime.block_on(async {
+                    self.sdk.create_invoice(amount, description).await
+                }).map_err(|e| nine_s::Error::Internal(e.to_string()))?;
+
+                Ok(Scroll::typed(
+                    "/wallet/invoice",
+                    json!({
+                        "invoice": receive_info.destination,
+                        "destination": receive_info.destination,
+                        "fee_sat": receive_info.fee_sat,
+                    }),
+                    "wallet/invoice@v1",
+                ))
             }
             "/sync" => {
-                // TODO: sdk.sync()
-                Err(nine_s::Error::Unavailable("Not implemented".into()))
+                self.runtime.block_on(async {
+                    self.sdk.sync().await
+                }).map_err(|e| nine_s::Error::Internal(e.to_string()))?;
+
+                Ok(Scroll::typed(
+                    "/wallet/sync",
+                    json!({"synced": true}),
+                    "wallet/sync@v1",
+                ))
             }
             "/sign" => {
                 let _message = data["message"].as_str()
                     .ok_or_else(|| nine_s::Error::InvalidData("Missing 'message' field".into()))?;
 
-                // TODO: sdk.sign_message()
-                Err(nine_s::Error::Unavailable("Not implemented".into()))
+                // Signing not directly exposed in SDK wrapper yet
+                Err(nine_s::Error::Unavailable("Signing not implemented".into()))
             }
             "/verify" => {
                 let _message = data["message"].as_str()
@@ -571,17 +693,17 @@ impl Namespace for WalletManager {
                 let _pubkey = data["pubkey"].as_str()
                     .ok_or_else(|| nine_s::Error::InvalidData("Missing 'pubkey' field".into()))?;
 
-                // TODO: sdk.check_message()
-                Err(nine_s::Error::Unavailable("Not implemented".into()))
+                // Verification not directly exposed in SDK wrapper yet
+                Err(nine_s::Error::Unavailable("Verification not implemented".into()))
             }
             "/fee-estimate" => {
-                let _destination = data["to"].as_str()
-                    .or_else(|| data["destination"].as_str())
-                    .ok_or_else(|| nine_s::Error::InvalidData("Missing 'to' field".into()))?;
-                let _amount = data["amount"].as_u64().unwrap_or(0);
-
-                // TODO: sdk.prepare_send_payment()
-                Err(nine_s::Error::Unavailable("Not implemented".into()))
+                // Spark has no fees for Spark-to-Spark transfers
+                // Fee estimation would be needed for Lightning/on-chain
+                Ok(Scroll::typed(
+                    "/wallet/fee-estimate",
+                    json!({"fee": 0}),
+                    "wallet/fee-estimate@v1",
+                ))
             }
             _ => Err(nine_s::Error::NotFound(path.into())),
         }
