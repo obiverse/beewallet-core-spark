@@ -163,6 +163,24 @@ impl SparkSdkWrapper {
         Ok(response.payment_request)
     }
 
+    /// Get Bitcoin address for on-chain deposits (faucet, exchanges)
+    ///
+    /// Returns a static Bitcoin address that the SDK monitors for deposits.
+    /// Useful for receiving from faucets, exchanges, or other on-chain sources.
+    pub async fn get_bitcoin_address(&self) -> Result<ReceiveInfo, SdkError> {
+        let guard = self.sdk.read().await;
+        let sdk = guard.as_ref().ok_or_else(|| SdkError::Generic("Not connected".into()))?;
+
+        let response = sdk.receive_payment(ReceivePaymentRequest {
+            payment_method: ReceivePaymentMethod::BitcoinAddress,
+        }).await?;
+
+        Ok(ReceiveInfo {
+            destination: response.payment_request,
+            fee_sat: response.fee as u64,
+        })
+    }
+
     /// List recent payments
     pub async fn list_payments(&self, limit: Option<u32>) -> Result<Vec<PaymentInfo>, SdkError> {
         let guard = self.sdk.read().await;
@@ -237,6 +255,42 @@ impl SparkSdkWrapper {
         let sdk = guard.as_ref().ok_or_else(|| SdkError::Generic("Not connected".into()))?;
         sdk.sync_wallet(SyncWalletRequest {}).await?;
         Ok(())
+    }
+
+    /// Sign message with wallet key
+    pub async fn sign_message(&self, message: &str) -> Result<super::SignedMessage, SdkError> {
+        let guard = self.sdk.read().await;
+        let sdk = guard.as_ref().ok_or_else(|| SdkError::Generic("Not connected".into()))?;
+
+        let response = sdk.sign_message(breez_sdk_spark::SignMessageRequest {
+            message: message.to_string(),
+            compact: false, // Use standard signature format
+        }).await?;
+
+        Ok(super::SignedMessage {
+            address: response.pubkey, // Spark uses pubkey as identity
+            message: message.to_string(),
+            signature: response.signature,
+        })
+    }
+
+    /// Verify message signature
+    pub async fn verify_message(
+        &self,
+        message: &str,
+        signature: &str,
+        pubkey: &str,
+    ) -> Result<bool, SdkError> {
+        let guard = self.sdk.read().await;
+        let sdk = guard.as_ref().ok_or_else(|| SdkError::Generic("Not connected".into()))?;
+
+        let response = sdk.check_message(breez_sdk_spark::CheckMessageRequest {
+            message: message.to_string(),
+            signature: signature.to_string(),
+            pubkey: pubkey.to_string(),
+        }).await?;
+
+        Ok(response.is_valid)
     }
 }
 

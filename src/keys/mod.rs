@@ -325,52 +325,20 @@ impl MasterKey {
     }
 }
 
-/// Derive a Mobinumber from a hex pubkey
+/// Derive a Mobinumber from a hex pubkey using Mobi21 protocol
 ///
-/// Format: XXX-XXX-XXX-XXX (12 digits from pubkey bytes)
+/// Format: XXX-XXX-XXX-XXX (12 digits from Mobi21 derivation)
 ///
-/// # Warning: Not for Authentication (Issue #7)
-/// Mobinumber has ~46 bits of effective entropy (~70 trillion values).
-/// Birthday paradox makes collisions likely around 10^6 users.
-/// Use Mobinumber for **human readability only**, never for identity verification
-/// or authentication. For cryptographic identity, use the full Nostr pubkey.
+/// # About Mobi21
+/// Mobi21 derives a 21-digit identifier from a secp256k1 public key using
+/// rejection sampling for uniform distribution. The display form is 12 digits,
+/// with progressive collision resolution via extended (15), long (18), and
+/// full (21) forms.
 ///
-/// # Algorithm
-/// 1. Take first 12 hex chars (6 bytes) of the pubkey
-/// 2. Convert each byte to 2 decimal digits (byte % 100)
-/// 3. Format as XXX-XXX-XXX-XXX
+/// For new code, use `crate::mobi::derive_from_hex()` to get the full Mobi struct
+/// with all forms available.
 pub fn derive_mobinumber(pubkey_hex: &str) -> String {
-    // Take first 12 hex chars (6 bytes) and convert to decimal groups
-    let hex_bytes: Vec<u8> = (0..pubkey_hex.len().min(12))
-        .step_by(2)
-        .filter_map(|i| {
-            if i + 2 <= pubkey_hex.len() {
-                u8::from_str_radix(&pubkey_hex[i..i + 2], 16).ok()
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    // Convert 6 bytes to 12 decimal digits
-    let mut digits = String::new();
-    for byte in hex_bytes.iter().take(6) {
-        digits.push_str(&format!("{:02}", byte % 100));
-    }
-
-    // Pad if needed
-    while digits.len() < 12 {
-        digits.push('0');
-    }
-
-    // Format as XXX-XXX-XXX-XXX
-    format!(
-        "{}-{}-{}-{}",
-        &digits[0..3],
-        &digits[3..6],
-        &digits[6..9],
-        &digits[9..12]
-    )
+    crate::mobi::derive_mobinumber(pubkey_hex)
 }
 
 impl Drop for MasterKey {
@@ -618,11 +586,14 @@ mod tests {
 
     #[test]
     fn derive_mobinumber_direct() {
-        // Test the derive_mobinumber function directly
-        let mobinumber = derive_mobinumber("0123456789abcdef");
+        // Test the derive_mobinumber function directly with a valid 64-char hex pubkey
+        // Using all-zeros pubkey - canonical Mobi21 test vector
+        let mobinumber = derive_mobinumber(
+            "0000000000000000000000000000000000000000000000000000000000000000"
+        );
 
-        // Each byte: 01=01, 23=23, 45=45, 67=67, 89=89, ab(171)=71
-        // Format: XXX-XXX-XXX-XXX
+        // Mobi21 canonical output for all-zeros: 587-135-537-154
+        assert_eq!(mobinumber, "587-135-537-154");
         assert_eq!(mobinumber.len(), 15); // 12 digits + 3 dashes
         assert!(mobinumber.chars().filter(|c| *c == '-').count() == 3);
     }

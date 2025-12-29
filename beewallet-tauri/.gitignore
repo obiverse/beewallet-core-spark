@@ -1,0 +1,12 @@
+# Rust
+/target
+Cargo.lock
+
+# Tauri
+/gen
+
+# Node
+node_modules/
+
+# Build
+/ui/dist

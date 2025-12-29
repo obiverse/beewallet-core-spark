@@ -62,6 +62,9 @@
 // 9S Protocol - always available
 pub mod nine_s;
 
+// Mobi21 Protocol - always available
+pub mod mobi;
+
 // Crypto module - encryption primitives
 #[cfg(feature = "crypto")]
 pub mod vault;
@@ -97,6 +100,18 @@ pub use nine_s::{Anchor, Patch, PatchError, PatchOp};
 // Sealed scrolls (requires crypto)
 #[cfg(feature = "crypto")]
 pub use nine_s::{SealedScroll, MAX_SEALED_SIZE};
+
+// Mobi21 Protocol (always available)
+pub use mobi::{
+    derive_from_bytes as mobi_derive_from_bytes,
+    derive_from_hex as mobi_derive_from_hex,
+    derive_mobinumber as mobi_derive_mobinumber,
+    derive_mobinumber_canonical as mobi_derive_mobinumber_canonical,
+    display_matches as mobi_display_matches,
+    normalize as mobi_normalize,
+    validate as mobi_validate,
+    Error as MobiError, Mobi,
+};
 
 // Vault crypto (crypto feature)
 #[cfg(feature = "crypto")]

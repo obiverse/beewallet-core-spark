@@ -18,7 +18,8 @@
 //! | Operation | 9S Path | Data |
 //! |-----------|---------|------|
 //! | Get balance | `read("/balance")` | - |
-//! | Get address | `read("/address")` | - |
+//! | Get Spark address | `read("/address")` | - |
+//! | Get Bitcoin address | `read("/bitcoin-address")` | - (for faucet/exchanges) |
 //! | List transactions | `read("/transactions")` | - |
 //! | Get single tx | `read("/tx/{txid}")` | - |
 //! | Send payment | `write("/send", ...)` | `{to, amount, feeRate?}` |
@@ -37,6 +38,8 @@ pub mod config;
 pub mod namespace;
 pub mod reactor;
 pub mod sdk;
+pub mod json_helpers;
+pub mod parse_helpers;
 
 // Persistence requires encrypted Store (crypto feature)
 #[cfg(feature = "crypto")]
@@ -244,6 +247,7 @@ impl WalletManager {
     /// Connect with mnemonic
     ///
     /// This is a lifecycle operation, not expressible as read/write.
+    /// Includes a 30-second timeout for network operations.
     pub fn connect(&self, mnemonic: &str, passphrase: Option<&str>) -> Result<(), WalletError> {
         let working_dir = self.working_dir
             .as_ref()
@@ -251,13 +255,21 @@ impl WalletManager {
             .unwrap_or_else(|| "/tmp/beewallet-spark".to_string());
 
         self.runtime.block_on(async {
-            self.sdk.connect(
-                mnemonic,
-                passphrase,
-                self.network,
-                &working_dir,
-            ).await
-        }).map_err(|e| WalletError::Sdk(e.to_string()))
+            // 30 second timeout for connect operation
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                self.sdk.connect(
+                    mnemonic,
+                    passphrase,
+                    self.network,
+                    &working_dir,
+                )
+            ).await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => Err(WalletError::Sdk(e.to_string())),
+                Err(_) => Err(WalletError::Sdk("Connection timed out after 30 seconds".to_string())),
+            }
+        })
     }
 
     /// Initialize from mnemonic (same as connect for Spark)
@@ -504,6 +516,11 @@ impl Namespace for WalletManager {
 
         match path {
             "/balance" => {
+                // Try to get from cache first for instant response
+                if let Some(cached) = self.reactor.get_cached("/wallet/balance") {
+                    return Ok(Some(cached));
+                }
+
                 let balance = self.runtime.block_on(async {
                     self.sdk.get_balance().await
                 }).map_err(|e| nine_s::Error::Internal(e.to_string()))?;
@@ -523,28 +540,71 @@ impl Namespace for WalletManager {
                 )))
             }
             "/address" => {
+                // Try to get from cache first
+                if let Some(cached) = self.reactor.get_cached("/wallet/address") {
+                    return Ok(Some(cached));
+                }
+
                 let address = self.runtime.block_on(async {
                     self.sdk.get_spark_address().await
                 }).map_err(|e| nine_s::Error::Internal(e.to_string()))?;
 
-                Ok(Some(Scroll::typed(
+                let scroll = Scroll::typed(
                     "/wallet/address",
                     json!({"address": address}),
                     "wallet/address@v1",
-                )))
+                );
+                
+                // Cache it
+                self.reactor.emit(scroll.clone());
+
+                Ok(Some(scroll))
+            }
+            "/bitcoin-address" | "/deposit-address" => {
+                // On-chain Bitcoin address for faucet, exchanges, etc.
+                if let Some(cached) = self.reactor.get_cached("/wallet/bitcoin-address") {
+                    return Ok(Some(cached));
+                }
+
+                let receive_info = self.runtime.block_on(async {
+                    self.sdk.get_bitcoin_address().await
+                }).map_err(|e| nine_s::Error::Internal(e.to_string()))?;
+
+                let scroll = Scroll::typed(
+                    "/wallet/bitcoin-address",
+                    json!({
+                        "address": receive_info.destination,
+                        "fee_sat": receive_info.fee_sat,
+                    }),
+                    "wallet/bitcoin-address@v1",
+                );
+
+                // Cache it
+                self.reactor.emit(scroll.clone());
+
+                Ok(Some(scroll))
             }
             "/pubkey" => {
+                if let Some(cached) = self.reactor.get_cached("/wallet/pubkey") {
+                    return Ok(Some(cached));
+                }
+
                 // Spark address includes the identity pubkey
                 let address = self.runtime.block_on(async {
                     self.sdk.get_spark_address().await
                 }).map_err(|e| nine_s::Error::Internal(e.to_string()))?;
 
                 // Extract pubkey from spark address (it's part of the address format)
-                Ok(Some(Scroll::typed(
+                let scroll = Scroll::typed(
                     "/wallet/pubkey",
                     json!({"pubkey": address}),
                     "wallet/pubkey@v1",
-                )))
+                );
+
+                // Cache it
+                self.reactor.emit(scroll.clone());
+
+                Ok(Some(scroll))
             }
             "/network" => {
                 Ok(Some(Scroll::typed(
@@ -679,22 +739,42 @@ impl Namespace for WalletManager {
                 ))
             }
             "/sign" => {
-                let _message = data["message"].as_str()
+                let message = data["message"].as_str()
                     .ok_or_else(|| nine_s::Error::InvalidData("Missing 'message' field".into()))?;
 
-                // Signing not directly exposed in SDK wrapper yet
-                Err(nine_s::Error::Unavailable("Signing not implemented".into()))
+                // Use SDK to sign
+                let signed = self.runtime.block_on(async {
+                    self.sdk.sign_message(message).await
+                }).map_err(|e| nine_s::Error::Internal(e.to_string()))?;
+
+                Ok(Scroll::typed(
+                    "/wallet/sign",
+                    json!({
+                        "address": signed.address,
+                        "message": signed.message,
+                        "signature": signed.signature,
+                    }),
+                    "wallet/signed-message@v1",
+                ))
             }
             "/verify" => {
-                let _message = data["message"].as_str()
+                let message = data["message"].as_str()
                     .ok_or_else(|| nine_s::Error::InvalidData("Missing 'message' field".into()))?;
-                let _signature = data["signature"].as_str()
+                let signature = data["signature"].as_str()
                     .ok_or_else(|| nine_s::Error::InvalidData("Missing 'signature' field".into()))?;
-                let _pubkey = data["pubkey"].as_str()
+                let pubkey = data["pubkey"].as_str()
                     .ok_or_else(|| nine_s::Error::InvalidData("Missing 'pubkey' field".into()))?;
 
-                // Verification not directly exposed in SDK wrapper yet
-                Err(nine_s::Error::Unavailable("Verification not implemented".into()))
+                // Use SDK to verify
+                let valid = self.runtime.block_on(async {
+                    self.sdk.verify_message(message, signature, pubkey).await
+                }).map_err(|e| nine_s::Error::Internal(e.to_string()))?;
+
+                Ok(Scroll::typed(
+                    "/wallet/verify",
+                    json!({"valid": valid}),
+                    "wallet/verification@v1",
+                ))
             }
             "/fee-estimate" => {
                 // Spark has no fees for Spark-to-Spark transfers
@@ -716,6 +796,7 @@ impl Namespace for WalletManager {
                 "/status".to_string(),
                 "/balance".to_string(),
                 "/address".to_string(),
+                "/bitcoin-address".to_string(),
                 "/pubkey".to_string(),
                 "/network".to_string(),
                 "/transactions".to_string(),

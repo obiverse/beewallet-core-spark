@@ -985,6 +985,7 @@ impl Store {
 /// # Security
 /// The env var allows container/sandbox environments to redirect storage
 /// without affecting app logic.
+#[cfg(feature = "crypto")]
 fn nine_s_root() -> Result<PathBuf> {
     if let Ok(root) = std::env::var("NINE_S_ROOT") {
         return Ok(PathBuf::from(root));
@@ -1002,6 +1003,7 @@ fn nine_s_root() -> Result<PathBuf> {
 /// - Cannot start with hyphen or underscore
 /// - Cannot be "." or ".." (path traversal)
 /// - Cannot contain path separators
+#[cfg(any(feature = "crypto", test))]
 fn validate_app_key(app_key: &str) -> Result<()> {
     // Length check
     if app_key.is_empty() {

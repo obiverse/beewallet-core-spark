@@ -1,0 +1,3 @@
+[submodule "vendor/mobi"]
+	path = vendor/mobi
+	url = https://github.com/obiverse/mobi.git
